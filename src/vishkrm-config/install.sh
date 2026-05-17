@@ -23,30 +23,28 @@ echo "Installing Vishkrm Configuration Utility (System Installation)..."
 SYSTEM_INSTALL_DIR="/usr/local/lib/vishkrm-config"
 SYSTEM_BIN_DIR="/usr/local/bin"
 
-# Audit fix template (handles I15: _REMOTE_USER=root at build time defeats fallback chain)
-# Always resolve to the real runtime user, never trust root.
-USERNAME="${USERNAME:-${_REMOTE_USER:-}}"
-if [ -z "$USERNAME" ] || [ "$USERNAME" = "root" ]; then
-    if getent passwd vishkrm >/dev/null 2>&1; then
-        USERNAME=vishkrm
-    else
-        USERNAME=$(getent passwd | awk -F: '$3>=1000 && $1!="nobody" {print $1; exit}')
-    fi
+# User directories (preserved for user tools)
+# Handle cases where HOME might not be set during build
+if [ -z "$HOME" ]; then
+    HOME="/home/vishkrm"
 fi
-USER_HOME="$(getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6)"
-[ -z "$USER_HOME" ] && USER_HOME="/home/${USERNAME}"
-USER_GROUP="$(id -gn "$USERNAME" 2>/dev/null || echo users)"
 
-# Override HOME so subsequent code works whether build env has it set or not
-HOME="$USER_HOME"
+# Diagnostic: print state before mkdir
+echo "DEBUG: HOME=$HOME USER=$USER PWD=$(pwd) WHOAMI=$(whoami)"
+echo "DEBUG: ls /usr/local/lib/ ->"
+ls -la /usr/local/lib/ 2>&1 | head -20
+echo "DEBUG: lsattr /usr/local/lib/ ->"
+lsattr -d /usr/local/lib/ 2>&1 || true
 
 # Create user's local directory structure but don't install system tools there
 mkdir -p "$HOME/.local"
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$HOME/.local/lib"
 
-# Ensure user's local directories are owned by the runtime user (not :vishkrm — real group is `users`)
-chown -R "$USERNAME:$USER_GROUP" "$HOME/.local" 2>/dev/null || true
+# Ensure user's local directories are owned by vishkrm
+if [ "$USER" != "vishkrm" ] && [ -d "/home/vishkrm" ]; then
+    chown -R vishkrm:users /home/vishkrm/.local 2>/dev/null || true
+fi
 
 # Create system installation directories
 mkdir -p "$SYSTEM_INSTALL_DIR"
@@ -197,9 +195,11 @@ else
     echo "Warning: Failed to install ssh-monitor executable"
 fi
 
-# Final ownership fix - ensure runtime user's .local directory is correctly owned
-chown -R "$USERNAME:$USER_GROUP" "$HOME/.local" 2>/dev/null || true
-echo "Set ownership of user .local directory for $USERNAME user (group: $USER_GROUP)"
+# Final ownership fix - ensure user's .local directory is owned by vishkrm (but empty of system tools)
+if [ "$USER" != "vishkrm" ] && [ -d "/home/vishkrm" ]; then
+    chown -R vishkrm:users /home/vishkrm/.local 2>/dev/null || true
+    echo "Set ownership of user .local directory for vishkrm user"
+fi
 
 echo "Vishkrm Configuration Utility installed successfully!"
 echo ""
