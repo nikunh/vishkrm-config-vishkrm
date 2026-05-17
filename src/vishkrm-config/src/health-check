@@ -1,0 +1,336 @@
+#!/bin/bash
+
+# Shellinator Reloaded - Health Check Script
+# Quick standalone health check for container deployment verification
+
+# Removed set -e to prevent hanging on command failures
+set -u  # Treat unset variables as errors instead
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log_success() { echo -e "${GREEN}✅ $1${NC}"; }
+log_error() { echo -e "${RED}❌ $1${NC}"; }
+log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
+log_info() { echo -e "${BLUE}ℹ️  $1${NC}"; }
+
+# Usage function
+usage() {
+    echo "Shellinator Reloaded Health Check"
+    echo ""
+    echo "Usage: $0 [options]"
+    echo ""
+    echo "Options:"
+    echo "  -q, --quick    Quick check (essential tools only)"
+    echo "  -f, --full     Full comprehensive check"
+    echo "  -j, --json     Output results in JSON format"
+    echo "  -h, --help     Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0 -q          Run quick health check"
+    echo "  $0 --full      Run full health check"
+    echo "  $0 -q -j       Quick check with JSON output"
+}
+
+# Global variables
+QUICK_MODE=false
+FULL_MODE=false
+JSON_OUTPUT=false
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -q|--quick)
+            QUICK_MODE=true
+            shift
+            ;;
+        -f|--full)
+            FULL_MODE=true
+            shift
+            ;;
+        -j|--json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# If no mode specified, default to quick
+if [[ "$QUICK_MODE" == false && "$FULL_MODE" == false ]]; then
+    QUICK_MODE=true
+fi
+
+# Results storage
+declare -A results
+total_checks=0
+passed_checks=0
+
+# Check if a command exists and store result
+check_command() {
+    local tool=$1
+    local description=$2
+    ((total_checks++))
+    
+    if command -v "$tool" &>/dev/null; then
+        results["$tool"]="✅ PASS"
+        ((passed_checks++))
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_success "$description: Found"
+        fi
+        return 0
+    else
+        results["$tool"]="❌ FAIL"
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_error "$description: Not found"
+        fi
+        return 1
+    fi
+}
+
+# Check service status
+check_service() {
+    local service=$1
+    local description=$2
+    ((total_checks++))
+    
+    if pgrep "$service" > /dev/null; then
+        results["$service"]="✅ RUNNING"
+        ((passed_checks++))
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_success "$description: Running"
+        fi
+        return 0
+    else
+        results["$service"]="❌ NOT_RUNNING"
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_error "$description: Not running"
+        fi
+        return 1
+    fi
+}
+
+# Quick health check
+quick_check() {
+    if [[ "$JSON_OUTPUT" == false ]]; then
+        echo -e "${BLUE}🔍 Shellinator Reloaded - Quick Health Check${NC}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Checking essential development tools and services..."
+        echo ""
+    fi
+    
+    # Core development tools
+    check_command "git" "Git"
+    check_command "node" "Node.js"
+    check_command "go" "Go"
+    check_command "python3" "Python"
+    check_command "docker" "Docker"
+    check_command "kubectl" "Kubectl"
+    check_command "terraform" "Terraform"
+    
+    # Essential services
+    check_service "sshd" "SSH Daemon"
+    
+    # Shell environment
+    check_command "zsh" "Zsh Shell"
+    
+    # Check Oh My Zsh installation
+    ((total_checks++))
+    if [ -d "$HOME/.oh-my-zsh" ]; then
+        results["ohmyzsh"]="✅ INSTALLED"
+        ((passed_checks++))
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_success "Oh My Zsh: Installed"
+        fi
+    else
+        results["ohmyzsh"]="❌ MISSING"
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_error "Oh My Zsh: Not installed"
+        fi
+    fi
+    
+    # Check Go in PATH
+    ((total_checks++))
+    if echo "$PATH" | grep -q "/usr/local/go/bin"; then
+        results["go_path"]="✅ CONFIGURED"
+        ((passed_checks++))
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_success "Go PATH: Configured"
+        fi
+    else
+        results["go_path"]="❌ MISSING"
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_error "Go PATH: Not configured"
+        fi
+    fi
+}
+
+# Full health check
+full_check() {
+    if [[ "$JSON_OUTPUT" == false ]]; then
+        echo -e "${BLUE}🔍 Shellinator Reloaded - Comprehensive Health Check${NC}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+    fi
+    
+    # Run quick check first
+    quick_check
+    
+    if [[ "$JSON_OUTPUT" == false ]]; then
+        echo ""
+        echo "Checking additional tools and configurations..."
+        echo ""
+    fi
+    
+    # Additional development tools
+    check_command "vim" "Vim Editor"
+    check_command "nvim" "Neovim"
+    check_command "tmux" "Tmux"
+    check_command "jq" "JQ JSON Processor"
+    check_command "yq" "YQ YAML Processor"
+    check_command "helm" "Helm"
+    check_command "k9s" "K9s"
+    check_command "aws" "AWS CLI"
+    check_command "sops" "SOPS"
+    check_command "gum" "Gum CLI"
+    check_command "aider" "Aider AI"
+    check_command "nu" "Nushell"
+    check_command "conda" "Conda"
+    check_command "lua" "Lua"
+    check_command "luarocks" "LuaRocks"
+    check_command "cloudflared" "Cloudflared"
+    check_command "code-server" "Code Server"
+    check_command "browsh" "Browsh Browser"
+    
+    # Security tools
+    check_command "gpg" "GPG"
+    check_command "ssh-keygen" "SSH Keygen"
+    
+    # Network tools
+    check_command "curl" "Curl"
+    check_command "wget" "Wget"
+    check_command "ping" "Ping"
+    check_command "netstat" "Netstat"
+    
+    # Check PowerLevel10k
+    ((total_checks++))
+    if [ -d "$HOME/.oh-my-zsh/custom/themes/powerlevel10k" ] || command -v p10k &>/dev/null; then
+        results["powerlevel10k"]="✅ INSTALLED"
+        ((passed_checks++))
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_success "PowerLevel10k: Installed"
+        fi
+    else
+        results["powerlevel10k"]="❌ MISSING"
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_error "PowerLevel10k: Not installed"
+        fi
+    fi
+    
+    # Check CUDA (optional)
+    if command -v nvidia-smi &>/dev/null; then
+        ((total_checks++))
+        results["cuda"]="✅ AVAILABLE"
+        ((passed_checks++))
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_success "NVIDIA CUDA: Available"
+        fi
+    else
+        results["cuda"]="ℹ️  OPTIONAL"
+        if [[ "$JSON_OUTPUT" == false ]]; then
+            log_info "NVIDIA CUDA: Not available (optional)"
+        fi
+    fi
+}
+
+# Generate summary
+generate_summary() {
+    local percentage=$((passed_checks * 100 / total_checks))
+    local status="UNKNOWN"
+    local status_icon="❓"
+    
+    if [ $percentage -ge 90 ]; then
+        status="EXCELLENT"
+        status_icon="🎉"
+    elif [ $percentage -ge 75 ]; then
+        status="GOOD"
+        status_icon="✅"
+    elif [ $percentage -ge 50 ]; then
+        status="FAIR"
+        status_icon="⚠️"
+    else
+        status="POOR"
+        status_icon="❌"
+    fi
+    
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        echo "{"
+        echo "  \"summary\": {"
+        echo "    \"total_checks\": $total_checks,"
+        echo "    \"passed_checks\": $passed_checks,"
+        echo "    \"percentage\": $percentage,"
+        echo "    \"status\": \"$status\","
+        echo "    \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
+        echo "  },"
+        echo "  \"results\": {"
+        local first=true
+        for key in "${!results[@]}"; do
+            if [[ "$first" == false ]]; then
+                echo ","
+            fi
+            echo -n "    \"$key\": \"${results[$key]}\""
+            first=false
+        done
+        echo ""
+        echo "  }"
+        echo "}"
+    else
+        echo ""
+        echo -e "${BLUE}📊 Health Check Summary${NC}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        if [ $percentage -ge 90 ]; then
+            echo -e "${GREEN}$status_icon $status: $passed_checks/$total_checks checks passed ($percentage%)${NC}"
+            echo -e "${GREEN}   Your Shellinator Reloaded container is fully functional!${NC}"
+        elif [ $percentage -ge 75 ]; then
+            echo -e "${GREEN}$status_icon $status: $passed_checks/$total_checks checks passed ($percentage%)${NC}"
+            echo -e "${YELLOW}   Most features working, some optional tools missing${NC}"
+        elif [ $percentage -ge 50 ]; then
+            echo -e "${YELLOW}$status_icon $status: $passed_checks/$total_checks checks passed ($percentage%)${NC}"
+            echo -e "${YELLOW}   Core functionality available, missing several features${NC}"
+        else
+            echo -e "${RED}$status_icon $status: $passed_checks/$total_checks checks passed ($percentage%)${NC}"
+            echo -e "${RED}   Major issues detected, container needs attention${NC}"
+        fi
+        echo ""
+        echo "Run 'vishkrm-config' for detailed configuration and troubleshooting."
+    fi
+}
+
+# Main execution
+main() {
+    if [[ "$FULL_MODE" == true ]]; then
+        full_check
+    else
+        quick_check
+    fi
+    
+    generate_summary
+}
+
+# Run main function
+main "$@"

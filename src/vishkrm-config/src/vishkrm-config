@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Vishkrm Configuration Utility - Main Entry Point
+# Lazy-loading modular configuration tool for Shellinator Reloaded
+
+# Security check - verify integrity before execution
+SECURITY_LIB="/usr/local/lib/vishkrm-config/lib/security.sh"
+if [ -f "$SECURITY_LIB" ]; then
+    source "$SECURITY_LIB"
+    security_check
+else
+    echo "SECURITY WARNING: Security library not found, attempting to restore..."
+    # Attempt to restore from source
+    WORKSPACE_SOURCE="/workspaces/shellinator-reloaded/.devcontainer/features/vishkrm-config"
+    if [ -d "$WORKSPACE_SOURCE" ]; then
+        cd "$WORKSPACE_SOURCE"
+        sudo ./install.sh
+        echo "SECURITY: System files restored, please run vishkrm-config again"
+        exit 1
+    else
+        echo "SECURITY ERROR: Cannot restore - source not found"
+        exit 1
+    fi
+fi
+
+# Set the base directory for the vishkrm-config utility (system installation)
+export VISHKRM_CONFIG_DIR="/usr/local/lib/vishkrm-config"
+
+# Check if the installation directory exists
+if [ ! -d "$VISHKRM_CONFIG_DIR" ]; then
+    echo "Error: Vishkrm config directory not found at $VISHKRM_CONFIG_DIR"
+    echo "Please run the installation script first."
+    exit 1
+fi
+
+# Load common library and core menu system
+if [ -f "$VISHKRM_CONFIG_DIR/lib/common.sh" ]; then
+    source "$VISHKRM_CONFIG_DIR/lib/common.sh"
+else
+    echo "Error: Common library not found at $VISHKRM_CONFIG_DIR/lib/common.sh"
+    exit 1
+fi
+
+if [ -f "$VISHKRM_CONFIG_DIR/core/menu.sh" ]; then
+    source "$VISHKRM_CONFIG_DIR/core/menu.sh"
+else
+    echo "Error: Core menu not found at $VISHKRM_CONFIG_DIR/core/menu.sh"
+    exit 1
+fi
+
+# Initialize common functions and variables
+init_common
+
+# Start the main menu.
+main_menu
