@@ -28,24 +28,24 @@ SYSTEM_BIN_DIR="/usr/local/bin"
 # Bug 2026-05-18: previously used $HOME, which at build time is /root (build
 # runs as root). That created /root/.local — invisible to the runtime user.
 # Resolve runtime user/home via standard chain (with root-fallback rejection).
-USERNAME="${USERNAME:-${_REMOTE_USER:-}}"
-if [ -z "$USERNAME" ] || [ "$USERNAME" = "root" ]; then
+RUNTIME_USER="${RUNTIME_USER:-${_REMOTE_USER:-}}"
+if [ -z "$RUNTIME_USER" ] || [ "$RUNTIME_USER" = "root" ]; then
     if getent passwd vishkrm >/dev/null 2>&1; then
-        USERNAME=vishkrm
+        RUNTIME_USER=vishkrm
     else
-        USERNAME=$(getent passwd | awk -F: '$3>=1000 && $1!="nobody" {print $1; exit}')
+        RUNTIME_USER=$(getent passwd | awk -F: '$3>=1000 && $1!="nobody" {print $1; exit}')
     fi
 fi
-USER_HOME="$(getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6)"
-[ -z "$USER_HOME" ] && USER_HOME="/home/${USERNAME}"
-USER_GROUP="$(id -gn "$USERNAME" 2>/dev/null || echo users)"
+USER_HOME="$(getent passwd "$RUNTIME_USER" 2>/dev/null | cut -d: -f6)"
+[ -z "$USER_HOME" ] && USER_HOME="/home/${RUNTIME_USER}"
+USER_GROUP="$(id -gn "$RUNTIME_USER" 2>/dev/null || echo users)"
 
 # Create user's local directory structure under runtime user's HOME (not /root)
 mkdir -p "$USER_HOME/.local/bin"
 mkdir -p "$USER_HOME/.local/lib"
 
 # Ensure user's local directories are owned by the runtime user
-chown -R "${USERNAME}:${USER_GROUP}" "$USER_HOME/.local" 2>/dev/null || true
+chown -R "${RUNTIME_USER}:${USER_GROUP}" "$USER_HOME/.local" 2>/dev/null || true
 
 # Create system installation directories
 mkdir -p "$SYSTEM_INSTALL_DIR"
