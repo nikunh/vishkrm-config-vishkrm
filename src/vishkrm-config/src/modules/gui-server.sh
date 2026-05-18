@@ -133,8 +133,10 @@ gui_apps_menu() {
         case "$choice" in
             "⬅️  Back"|"") return ;;
             *)
-                # Strip "[X] " or "[ ] " prefix
-                local app="${choice#* }"
+                # Strip "[X] " or "[ ] " prefix. Use `] ` as the anchor — `#* `
+                # alone matches the space INSIDE `[ ]` for the OFF case, leaving
+                # `] firefox` and creating a phantom app key on every toggle.
+                local app="${choice#*\] }"
                 gui_toggle_app "$app"
                 ;;
         esac
