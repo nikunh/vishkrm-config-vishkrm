@@ -23,6 +23,7 @@ main_menu() {
             "🎭 Branch Personality Info" \
             "📡 NAS Configuration" \
             "🔐 SSH Service Management" \
+            "🖥️  GUI Server" \
             "🔍 System Verification" \
             "⚙️  Environment Settings" \
             "📊 System Information" \
@@ -58,6 +59,12 @@ main_menu() {
                 # Load SSH module on-demand
                 if load_module "ssh"; then
                     ssh_menu
+                fi
+                ;;
+            "🖥️  GUI Server")
+                # Load GUI Server module on-demand (bucket #8)
+                if load_module "gui-server"; then
+                    gui_server_menu
                 fi
                 ;;
             "🎭 Branch Personality Info")
