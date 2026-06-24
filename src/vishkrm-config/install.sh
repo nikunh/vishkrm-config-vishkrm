@@ -81,7 +81,14 @@ if [ -d "$SCRIPT_DIR/src" ]; then
     if [ -f "$SCRIPT_DIR/src/ssh-monitor.sh" ]; then
         cp "$SCRIPT_DIR/src/ssh-monitor.sh" "$SYSTEM_INSTALL_DIR/"
     fi
-    
+    # WS-10: in-container version awareness + shared installed-versions recorder
+    if [ -f "$SCRIPT_DIR/src/feature-updates" ]; then
+        cp "$SCRIPT_DIR/src/feature-updates" "$SYSTEM_INSTALL_DIR/"
+    fi
+    if [ -f "$SCRIPT_DIR/src/record-installed-feature" ]; then
+        cp "$SCRIPT_DIR/src/record-installed-feature" "$SYSTEM_INSTALL_DIR/"
+    fi
+
     # Copy directory contents, not directories themselves
     if [ -d "$SCRIPT_DIR/src/lib" ]; then
         cp "$SCRIPT_DIR/src/lib"/* "$SYSTEM_INSTALL_DIR/lib/" 2>/dev/null || true
@@ -194,6 +201,28 @@ if [ -f "$SYSTEM_INSTALL_DIR/ssh-monitor.sh" ] && cp "$SYSTEM_INSTALL_DIR/ssh-mo
     echo "SSH monitor system executable installed at $SYSTEM_BIN_DIR/ssh-monitor (immutable)"
 else
     echo "Warning: Failed to install ssh-monitor executable"
+fi
+
+# WS-10: feature-updates (Claude-facing detect + best-effort hot-pull) and the
+# shared record-installed-feature recorder. NOT chattr +i — the hot-pull path
+# may re-run install scripts that refresh these in place.
+if [ -f "$SYSTEM_INSTALL_DIR/feature-updates" ] && cp "$SYSTEM_INSTALL_DIR/feature-updates" "$SYSTEM_BIN_DIR/feature-updates"; then
+    chmod 555 "$SYSTEM_BIN_DIR/feature-updates"
+    echo "feature-updates system executable installed at $SYSTEM_BIN_DIR/feature-updates"
+else
+    echo "Warning: Failed to install feature-updates executable"
+fi
+if [ -f "$SYSTEM_INSTALL_DIR/record-installed-feature" ] && cp "$SYSTEM_INSTALL_DIR/record-installed-feature" "$SYSTEM_BIN_DIR/record-installed-feature"; then
+    chmod 555 "$SYSTEM_BIN_DIR/record-installed-feature"
+    echo "record-installed-feature system executable installed at $SYSTEM_BIN_DIR/record-installed-feature"
+else
+    echo "Warning: Failed to install record-installed-feature executable"
+fi
+
+# WS-10: record vishkrm-config's own installed version into the manifest.
+VC_VERSION="$(jq -r '.version' "$SCRIPT_DIR/devcontainer-feature.json" 2>/dev/null || echo unknown)"
+if [ -x "$SYSTEM_BIN_DIR/record-installed-feature" ]; then
+    "$SYSTEM_BIN_DIR/record-installed-feature" vishkrm-config "$VC_VERSION" || true
 fi
 
 # Final ownership fix - ensure user's .local directory is owned by vishkrm (but empty of system tools)

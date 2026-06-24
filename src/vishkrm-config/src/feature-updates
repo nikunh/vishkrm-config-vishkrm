@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# feature-updates — WS-10 in-container version awareness for Claude (and humans).
+#
+# Answers "what is installed in THIS container vs what is the latest published?"
+# so Claude inside the container can reason about staleness and decide what to
+# pull — without a rebuild.
+#
+#   feature-updates            # human status (default)
+#   feature-updates --json     # machine-readable: per-feature installed/latest/update_available + base image
+#   feature-updates pull NAME  # best-effort hot-pull: re-run one feature's install.sh in place (token-required)
+#   feature-updates pull-all   # hot-pull every outdated feature (best-effort)
+#
+# DETECT (json/status) is always-safe and AUTH-FREE: "latest" = the pin in the
+# branch's devcontainer.json on GitHub raw (CI bumps it on every publish), and
+# "installed" = the manifest (/etc/shellinator/installed-features.json, written
+# by record-installed-feature / capability-publisher) falling back to the local
+# baked pin. Right after a prebuild, pins == installed, so it is correct even
+# before features self-record; the manifest captures anything hot-pulled since.
+#
+# APPLY (pull) is best-effort, FEATURES-ONLY, and requires a GitHub token (the
+# feature repos are PRIVATE/D2): re-runs the feature's OWN idempotent install.sh
+# ("shellinator IS the product" — never ad-hoc edits) then records the new
+# version. Base-image updates are DETECT-ONLY — rebuild stays canonical.
+set -euo pipefail
+
+MANIFEST="/etc/shellinator/installed-features.json"
+OWNER="nikunh"
+REPO="shellinator"
+
+# --- locate the consumer devcontainer.json (baked pins / installed fallback) ---
+find_local_devcontainer() {
+    local d
+    for d in /workspaces/shellinator /workspaces/*/ "$HOME"/shellinator "$HOME"/workspace; do
+        [ -f "$d/.devcontainer/devcontainer.json" ] && { echo "$d/.devcontainer/devcontainer.json"; return 0; }
+    done
+    return 1
+}
+LOCAL_DC="$(find_local_devcontainer || true)"
+
+# --- branch to treat as "latest published" (the personality this container rides) ---
+detect_branch() {
+    local b
+    if [ -n "$LOCAL_DC" ]; then
+        b=$(git -C "$(dirname "$(dirname "$LOCAL_DC")")" branch --show-current 2>/dev/null || true)
+    fi
+    echo "${b:-vishkrm}"
+}
+BRANCH="$(detect_branch)"
+RAW_DC="https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/.devcontainer/devcontainer.json"
+
+CMD="${1:-status}"
+
+# ----------------------------------------------------------------------------
+# DETECT — compute the report as JSON on stdout (always-safe, auth-free)
+# ----------------------------------------------------------------------------
+compute_json() {
+    local remote_dc
+    remote_dc="$(curl -fsSL "$RAW_DC" 2>/dev/null || true)"
+    MANIFEST="$MANIFEST" LOCAL_DC="${LOCAL_DC:-}" BRANCH="$BRANCH" \
+    python3 - "$remote_dc" <<'PY'
+import json, os, sys, re
+
+remote_raw = sys.argv[1]
+manifest_path = os.environ.get("MANIFEST", "")
+local_dc_path = os.environ.get("LOCAL_DC", "")
+branch = os.environ.get("BRANCH", "")
+
+def vtuple(v):
+    try: return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+    except Exception: return (0,)
+
+# pins out of a devcontainer.json string: feature-name -> version
+def pins(text):
+    out = {}
+    if not text: return out
+    try: dc = json.loads(text)
+    except Exception: return out
+    for key in (dc.get("features") or {}):
+        m = re.search(r"/([^/]+)-vishkrm/([^:]+):([0-9][0-9.]*)", key)
+        if m: out[m.group(2)] = m.group(3)
+    return out
+
+def base_image(text):
+    if not text: return None
+    try: return json.loads(text).get("image")
+    except Exception: return None
+
+remote_pins = pins(remote_raw)
+local_text = ""
+if local_dc_path and os.path.exists(local_dc_path):
+    local_text = open(local_dc_path).read()
+local_pins = pins(local_text)
+
+manifest = {}
+if manifest_path and os.path.exists(manifest_path):
+    try:
+        m = json.load(open(manifest_path))
+        if isinstance(m, dict): manifest = m
+    except Exception: pass
+
+features = sorted(set(local_pins) | set(manifest) | set(remote_pins))
+rows = []
+for f in features:
+    installed = (manifest.get(f) or {}).get("version") or local_pins.get(f)
+    latest = remote_pins.get(f)
+    upd = bool(installed and latest and vtuple(latest) > vtuple(installed))
+    rows.append({
+        "feature": f,
+        "installed": installed,
+        "latest": latest,
+        "source": "manifest" if f in manifest else ("pin" if f in local_pins else "remote-only"),
+        "update_available": upd,
+    })
+
+report = {
+    "branch": branch,
+    "base_image": {
+        "installed": base_image(local_text),
+        "latest": base_image(remote_raw),
+        "note": "base-image updates are DETECT-ONLY; apply on rebuild (devpod up --recreate)",
+    },
+    "features": rows,
+    "updates_available": sorted(r["feature"] for r in rows if r["update_available"]),
+    "remote_reachable": bool(remote_raw),
+}
+print(json.dumps(report, indent=2))
+PY
+}
+
+case "$CMD" in
+    --json|json)
+        compute_json
+        ;;
+    status|"")
+        report="$(compute_json)"
+        echo "$report" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+if not r.get("remote_reachable"):
+    print("⚠️  could not reach GitHub raw — showing installed only; latest unknown")
+print(f"branch: {r[\"branch\"]}")
+bi=r["base_image"]
+print(f"base image: installed={bi.get(\"installed\")} latest={bi.get(\"latest\")} (detect-only)")
+ups=r["updates_available"]
+if not ups:
+    print("✅ all features up to date")
+else:
+    print(f"📦 {len(ups)} update(s) available:")
+    for row in r["features"]:
+        if row["update_available"]:
+            print(f"  {row[\"feature\"]:<28} {row[\"installed\"]} → {row[\"latest\"]}  (run: feature-updates pull {row[\"feature\"]})")
+'
+        ;;
+    pull|pull-all)
+        # APPLY tier — best-effort, features-only, token-required (private repos).
+        TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+        if [ -z "$TOKEN" ] && command -v gh >/dev/null 2>&1; then
+            TOKEN="$(gh auth token 2>/dev/null || true)"
+        fi
+        if [ -z "$TOKEN" ]; then
+            cat >&2 <<MSG
+❌ hot-pull needs a GitHub token (feature repos are PRIVATE/D2).
+   Set GITHUB_TOKEN / GH_TOKEN, or 'gh auth login', then retry.
+   Detect is always available without a token:  feature-updates --json
+   Canonical update is still a rebuild:          devpod up --recreate
+MSG
+            exit 3
+        fi
+
+        report="$(compute_json)"
+        if [ "$CMD" = "pull-all" ]; then
+            targets="$(echo "$report" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["updates_available"]))')"
+        else
+            targets="${2:-}"
+            [ -z "$targets" ] && { echo "usage: feature-updates pull <feature-name>" >&2; exit 2; }
+        fi
+        [ -z "$targets" ] && { echo "✅ nothing to pull — all up to date"; exit 0; }
+
+        rc=0
+        for feat in $targets; do
+            repo="${feat}-vishkrm"
+            latest="$(echo "$report" | python3 -c "import json,sys
+r=json.load(sys.stdin)
+print(next((x['latest'] for x in r['features'] if x['feature']=='$feat'), '') or '')")"
+            echo "→ hot-pulling $feat (latest=${latest:-?}) from ${OWNER}/${repo}…"
+            url="https://raw.githubusercontent.com/${OWNER}/${repo}/main/src/${feat}/install.sh"
+            tmp="$(mktemp -d)"; script="$tmp/install.sh"
+            if ! curl -fsSL -H "Authorization: token $TOKEN" "$url" -o "$script" 2>/dev/null; then
+                echo "  ✗ could not fetch install.sh ($url) — skipping" >&2; rc=1; rm -rf "$tmp"; continue
+            fi
+            chmod +x "$script"
+            if ( cd "$tmp" && sudo -E bash "$script" ); then
+                [ -n "$latest" ] && record-installed-feature "$feat" "$latest" || true
+                echo "  ✓ $feat re-installed in place"
+            else
+                echo "  ✗ $feat install.sh failed — rebuild stays canonical" >&2; rc=1
+            fi
+            rm -rf "$tmp"
+        done
+        echo "ℹ️  hot-pull is convenience; 'devpod up --recreate' brings the full canonical state."
+        exit $rc
+        ;;
+    *)
+        echo "usage: feature-updates [status|--json|pull <feature>|pull-all]" >&2
+        exit 2
+        ;;
+esac

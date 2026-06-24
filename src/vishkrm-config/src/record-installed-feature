@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# record-installed-feature — WS-10 shared atomic recorder.
+#
+# Upserts one feature's installed version into the authoritative manifest
+# /etc/shellinator/installed-features.json (schema: { "<feature>": {version,
+# installed_at} } — matches capability-publisher). Any feature's install.sh, or
+# the `feature-updates pull` hot-pull path, calls this so the container knows
+# what is ACTUALLY installed (vs what the baked devcontainer.json pins claim).
+#
+# Usage: record-installed-feature <feature-name> <version>
+# Secret-free, idempotent, CIFS-irrelevant (local /etc). Atomic via tmp+rename.
+set -euo pipefail
+
+FEATURE="${1:-}"
+VERSION="${2:-}"
+if [ -z "$FEATURE" ] || [ -z "$VERSION" ]; then
+    echo "usage: record-installed-feature <feature-name> <version>" >&2
+    exit 2
+fi
+
+MANIFEST="/etc/shellinator/installed-features.json"
+mkdir -p /etc/shellinator 2>/dev/null || true
+
+if ! python3 - "$FEATURE" "$VERSION" "$MANIFEST" <<'PY'
+import json, os, sys, datetime
+feature, version, path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        d = {}
+except Exception:
+    d = {}
+d[feature] = {"version": version,
+              "installed_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}
+tmp = path + ".tmp"
+json.dump(d, open(tmp, "w"), indent=2)
+os.replace(tmp, path)
+PY
+then
+    echo "record-installed-feature: python3 unavailable or write failed for $FEATURE" >&2
+    exit 1
+fi
+echo "recorded $FEATURE=$VERSION in $MANIFEST"
