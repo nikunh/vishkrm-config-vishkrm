@@ -1,6 +1,14 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 # Feature Update Checker for Zsh Prompt
 # Checks for available updates to DevContainer features and displays in prompt
+#
+# NOTE: shebang is bash (not zsh) on purpose — this script is written in bash dialect
+# (BASH_SOURCE run-guard, ${BASH_REMATCH[N]} regex captures, ${!assoc[@]} key expansion).
+# Under a zsh shebang all three silently misbehave: BASH_SOURCE is empty so the dispatcher
+# never runs, BASH_REMATCH is empty so feature parsing yields nothing, and ${!assoc[@]}
+# throws "bad substitution". The zsh prompt extension *executes* this file (subprocess),
+# so the shebang governs the interpreter; bash makes it work. The %F{..} prompt codes it
+# emits are just strings the zsh prompt expands on display.
 
 CACHE_FILE="/tmp/feature-updates-cache.json"
 CACHE_DURATION=3600  # 1 hour in seconds
