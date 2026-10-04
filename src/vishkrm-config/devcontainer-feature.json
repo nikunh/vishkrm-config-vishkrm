@@ -4,6 +4,9 @@
   "version": "0.0.10",
   "description": "Comprehensive configuration utility for Vishkrm Shellinator with NAS connectivity, verification tools, and more.",
   "postCreateCommand": "/usr/local/lib/vishkrm-config/post-create.sh",
+  "containerEnv": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "/usr/local/share/claude-mods/session-ticker"
+  },
   "installsAfter": [
     "ghcr.io/nikunh/001-dev-packages-vishkrm/001-dev-packages",
     "ghcr.io/nikunh/002-user-setup-vishkrm/002-user-setup",

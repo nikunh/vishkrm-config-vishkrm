@@ -225,6 +225,41 @@ if [ -x "$SYSTEM_BIN_DIR/record-installed-feature" ]; then
     "$SYSTEM_BIN_DIR/record-installed-feature" vishkrm-config "$VC_VERSION" || true
 fi
 
+# --- session-ticker mod -----------------------------------------------------
+# A Claude Code plugin (mod) that draws a live cross-session status board.
+# Installed to a SYSTEM path and loaded via CLAUDE_CODE_PLUGIN_DIRS (set in this
+# feature's devcontainer-feature.json containerEnv + the profile.d shim below),
+# so it loads in every session regardless of whether ~/.claude is a NAS symlink.
+# Not chattr +i — the engine reads it and a feature re-run must be able to refresh it.
+TICKER_SRC="$SCRIPT_DIR/src/session-ticker"
+TICKER_DST="/usr/local/share/claude-mods/session-ticker"
+if [ -d "$TICKER_SRC" ]; then
+    rm -rf "$TICKER_DST"
+    mkdir -p "$TICKER_DST"
+    cp -r "$TICKER_SRC/." "$TICKER_DST/"
+    find "$TICKER_DST" -type d -exec chmod 755 {} \;
+    find "$TICKER_DST" -type f -exec chmod 644 {} \;
+    echo "Installed session-ticker mod to $TICKER_DST"
+
+    # profile.d shim: ensure login/SSH shells (which don't inherit containerEnv)
+    # also load the mod. Idempotent; appends the dir only if not already present.
+    cat > /etc/profile.d/claude-mods.sh <<'PROFILE'
+# shellinator: load bundled Claude Code mods in every session
+_ccmod="/usr/local/share/claude-mods/session-ticker"
+if [ -d "$_ccmod" ]; then
+  case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in
+    *":$_ccmod:"*) : ;;
+    *) export CLAUDE_CODE_PLUGIN_DIRS="${CLAUDE_CODE_PLUGIN_DIRS:+$CLAUDE_CODE_PLUGIN_DIRS:}$_ccmod" ;;
+  esac
+fi
+unset _ccmod
+PROFILE
+    chmod 644 /etc/profile.d/claude-mods.sh
+    echo "Wrote /etc/profile.d/claude-mods.sh (CLAUDE_CODE_PLUGIN_DIRS shim)"
+else
+    echo "Note: session-ticker mod source not found at $TICKER_SRC — skipping"
+fi
+
 # Final ownership fix - ensure user's .local directory is owned by vishkrm (but empty of system tools)
 if [ "$USER" != "vishkrm" ] && [ -d "/home/vishkrm" ]; then
     chown -R vishkrm:users /home/vishkrm/.local 2>/dev/null || true

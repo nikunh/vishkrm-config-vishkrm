@@ -1,0 +1,33 @@
+{
+  "name": "session-ticker",
+  "version": "0.2.0",
+  "description": "Live board of other same-host Claude sessions: a one-line status per session, colour-coded, with needs-you alerts",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "summaryModel": {
+      "type": "string",
+      "title": "Summary model",
+      "options": ["haiku", "sonnet", "off"],
+      "default": "haiku",
+      "description": "Model used to write each session's teammate-style summary, or 'off' to show only the mechanical last action (no model calls)"
+    },
+    "summaryEverySeconds": {
+      "type": "number",
+      "title": "Summary interval (seconds)",
+      "default": 45,
+      "description": "Minimum seconds between summary refreshes per session"
+    },
+    "ttlMinutes": {
+      "type": "number",
+      "title": "Drop after (minutes)",
+      "default": 6,
+      "description": "Drop a session from the board this many minutes after its last update"
+    },
+    "maxCards": {
+      "type": "number",
+      "title": "Max cards",
+      "default": 0,
+      "description": "Maximum session cards to show (0 = fit to the pane height)"
+    }
+  }
+}
