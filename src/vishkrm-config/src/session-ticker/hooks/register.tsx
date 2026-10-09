@@ -14,9 +14,11 @@ const pins = atom({ plugin: 'session-ticker', key: 'pins' } as const, [] as Pin[
 let CFG = { summaryModel: 'haiku', summaryEverySeconds: 45, ttlMinutes: 6, maxCards: 0, activeSeconds: 20 }
 
 // This session's own ticket, kept in module vars (re-seeded on every load).
-let myKey = '' // stable filename key (sanitized cwd) — no event needed
+let myKey = '' // stable filename key (<host>__<sanitized cwd>) — no event needed
 let myId = '' // real session id when an event gives us one, else myKey
 let myCwd = ''
+let myHost = 'local' // SHELLINATOR_HOST — namespaces state files so a NAS-shared
+let myHostResolved = false // ~/.claude doesn't collide across hosts; board filters by it
 let mySummary = 'started session'
 let mySource = 'startup'
 let myState: TicketState = 'working'
@@ -214,7 +216,7 @@ async function writeMine($: any, ended?: boolean): Promise<void> {
   if (!myKey) return
   try {
     const dir = await ticketDir($)
-    const host = (await $.env.get('SHELLINATOR_HOST')) ?? 'local'
+    const host = myHost
     const label = myCwd.split('/').filter(Boolean).pop() ?? myKey
     const t: Ticket = {
       key: myKey,
@@ -255,7 +257,11 @@ async function refresh($: any): Promise<void> {
   }
   const now = await $.clock.now()
   const ttl = Math.max(1, CFG.ttlMinutes) * 60_000
-  const live = list.filter(t => !t.ended && stateOf(t) !== 'ended' && now - t.updated < ttl)
+  let live = list.filter(t => !t.ended && stateOf(t) !== 'ended' && now - t.updated < ttl)
+  // Same-host board: when we know our host, show only this host's sessions
+  // (a NAS-shared ticket dir can hold other hosts' files). If host resolution
+  // failed (myHost === 'local'), don't hide anything — show them all.
+  if (myHost !== 'local') live = live.filter(t => (t.host || 'local') === myHost)
   live.sort((a, b) => b.updated - a.updated)
   await update($, tickets, () => live)
   const need = live.filter(t => stateOf(t) === 'needs-you').length
@@ -296,7 +302,15 @@ async function ensure($: any, e?: any): Promise<void> {
       /* leave empty */
     }
   }
-  if (!myKey) myKey = sanitize(myCwd)
+  if (!myHostResolved) {
+    myHost = (await $.env.get('SHELLINATOR_HOST')) || 'local'
+    myHostResolved = true
+  }
+  // Host-namespaced key: <host>__<sanitized cwd>. On a NAS-shared ~/.claude two
+  // hosts sitting in the same cwd would otherwise write the same filename and
+  // clobber each other's ticket/task/pin state — the host prefix keeps them
+  // distinct. The session-task-stack / pin-preview skills build the SAME key.
+  if (!myKey) myKey = `${sanitize(myHost)}__${sanitize(myCwd)}`
   if (!myId) myId = myKey
   if (!booted) {
     booted = true
