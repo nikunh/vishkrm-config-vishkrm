@@ -1,14 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Ticket, TicketState } from '../types'
+import type { Ticket, TicketState, TaskNode, TaskStatus, Pin } from '../types'
 
 const PANE = 'session-ticker'
+const PIN_PREFIX = 'pin-' // pane ids: letters/digits/_/- only, no ':'
 
 const tickets = atom({ plugin: 'session-ticker', key: 'tickets' } as const, [] as Ticket[])
+const tasks = atom({ plugin: 'session-ticker', key: 'tasks' } as const, [] as TaskNode[])
+const pins = atom({ plugin: 'session-ticker', key: 'pins' } as const, [] as Pin[])
 
 // Config (filled from userConfig in register; defaults match the manifest).
-let CFG = { summaryModel: 'haiku', summaryEverySeconds: 45, ttlMinutes: 6, maxCards: 0 }
+let CFG = { summaryModel: 'haiku', summaryEverySeconds: 45, ttlMinutes: 6, maxCards: 0, activeSeconds: 20 }
 
 // This session's own ticket, kept in module vars (re-seeded on every load).
 let myKey = '' // stable filename key (sanitized cwd) — no event needed
@@ -18,6 +21,7 @@ let mySummary = 'started session'
 let mySource = 'startup'
 let myState: TicketState = 'working'
 let lastAction = '' // last tool action this session performed
+let myLastActivity = 0 // real activity only (prompt/tool), NOT the 30s heartbeat
 let lastSummaryAt = 0 // throttle the model summary
 let booted = false
 let lastErr = ''
@@ -30,6 +34,52 @@ async function ticketDir($: any): Promise<string> {
   if (override) return override
   const home = await $.env.get('HOME')
   return home ? `${home}/.claude/session-ticker/tickets` : '.session-ticker/tickets'
+}
+
+// Per-SESSION task stack, not per-project: written directly by the model
+// (Write/Edit tools, per the session-task-stack skill), keyed by sanitized
+// cwd — the same key `myKey` already uses for tickets, computed by this
+// plugin, never by the model. Deliberately NOT keyed by real session id:
+// e.session_id is never populated by any event this plugin receives (see
+// `ensure()` below), so a UUID-keyed scheme forces the model to self-report
+// its own id every write, which it sometimes gets wrong by copying a stale
+// id off an existing file — that caused real cross-session data corruption.
+// cwd-keying can't have that failure mode: the model never chooses the key.
+// This plugin only ever reads its own session's file here.
+async function tasksDir($: any): Promise<string> {
+  const override = await $.env.get('SESSION_TASKS_DIR')
+  if (override) return override
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude/session-ticker/tasks` : '.session-ticker/tasks'
+}
+
+// Pinned chat messages, same cwd-keyed-file convention as tasks (see
+// tasksDir above) — one file per worklog directory, content written by
+// both the model (Write/Edit, to add/update a pin) and this plugin itself
+// (to record which line got clicked, and to drop a pin on close).
+async function pinsDir($: any): Promise<string> {
+  const override = await $.env.get('SESSION_PINS_DIR')
+  if (override) return override
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude/session-ticker/pins` : '.session-ticker/pins'
+}
+
+async function loadPins($: any): Promise<Pin[]> {
+  if (!myKey) return []
+  try {
+    const dir = await pinsDir($)
+    const txt = await $.fs.read(`${dir}/${myKey}.json`)
+    const parsed = JSON.parse(txt) as { pins?: Pin[] }
+    return Array.isArray(parsed.pins) ? parsed.pins : []
+  } catch {
+    return []
+  }
+}
+
+async function savePins($: any, list: Pin[]): Promise<void> {
+  if (!myKey) return
+  const dir = await pinsDir($)
+  await $.fs.write(`${dir}/${myKey}.json`, JSON.stringify({ pins: list }))
 }
 
 function sanitize(s: string): string {
@@ -78,7 +128,7 @@ function describeAction(e: any): string {
 }
 
 function short(s: string): string {
-  const w = s.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
+  const w = String(s ?? '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
   let t = w.slice(0, 12).join(' ')
   if (t.length > 72) t = t.slice(0, 71) + '…'
   else if (w.length > 12) t = t + ' …'
@@ -175,6 +225,7 @@ async function writeMine($: any, ended?: boolean): Promise<void> {
       source: mySource,
       state: ended ? 'ended' : myState,
       updated: await $.clock.now(),
+      lastActivity: myLastActivity,
       ...(ended ? { ended: true } : {}),
     }
     await $.fs.write(`${dir}/${myKey}.json`, JSON.stringify(t))
@@ -205,12 +256,32 @@ async function refresh($: any): Promise<void> {
   const now = await $.clock.now()
   const ttl = Math.max(1, CFG.ttlMinutes) * 60_000
   const live = list.filter(t => !t.ended && stateOf(t) !== 'ended' && now - t.updated < ttl)
-  live.sort((a, b) => rank(stateOf(a)) - rank(stateOf(b)) || b.updated - a.updated)
+  live.sort((a, b) => b.updated - a.updated)
   await update($, tickets, () => live)
   const need = live.filter(t => stateOf(t) === 'needs-you').length
   $.ui.status(
     live.length ? `◈ ${live.length} live${need ? ` · ${need} need you` : ''}` : undefined,
   )
+
+  // This session's own task stack — written by the model directly, never by
+  // this plugin. Keyed by myKey (sanitized cwd), computed by this plugin the
+  // same way the ticket file is — no pointer indirection, no session-id
+  // self-report, so the model can never target the wrong file.
+  if (myKey) {
+    try {
+      const tdir = await tasksDir($)
+      const txt = await $.fs.read(`${tdir}/${myKey}.json`)
+      const parsed = JSON.parse(txt) as { tasks?: TaskNode[] }
+      await update($, tasks, () => (Array.isArray(parsed.tasks) ? parsed.tasks : []))
+    } catch {
+      await update($, tasks, () => [])
+    }
+  }
+
+  // Pinned messages — same cwd-keyed file, read on the same cadence so a
+  // model edit (adding/updating a pin's lines) shows up without a restart.
+  const pinList = await loadPins($)
+  await update($, pins, () => pinList)
 }
 
 // Lazily initialize from whatever event fired (session.start never fires on a
@@ -229,8 +300,9 @@ async function ensure($: any, e?: any): Promise<void> {
   if (!myId) myId = myKey
   if (!booted) {
     booted = true
+    myLastActivity = await $.clock.now()
     await writeMine($)
-    $.clock.every(30_000, () => void writeMine($))
+    $.clock.every(30_000, () => void writeMine($)) // liveness only — does not touch myLastActivity
     $.clock.every(5_000, () => void refresh($))
   }
 }
@@ -241,6 +313,7 @@ export const register: Register = (on, options) => {
     summaryEverySeconds: Number(options?.summaryEverySeconds ?? 45),
     ttlMinutes: Number(options?.ttlMinutes ?? 6),
     maxCards: Number(options?.maxCards ?? 0),
+    activeSeconds: Number(options?.activeSeconds ?? 20),
   }
 
   on('session.start', async ($, e, next) => {
@@ -249,8 +322,28 @@ export const register: Register = (on, options) => {
     myState = 'working'
     await ensure($, e)
     await $.command.register({ name: 'ticker', description: 'Open the live session ticker' })
+    await $.command.register({
+      name: 'pin',
+      description:
+        'Pin exact text as its own tab next to the ticker. Mechanical only — does not resolve "pin that" itself; see the pin-preview skill for picking which message is meant.',
+    })
     void $.ui.open({ id: PANE, title: 'Session ticker' })
     void refresh($)
+    // Reopen every surviving pin as its own tab. Without this, a pin only
+    // exists until the next session.start (startup, resume, clear, OR
+    // compact) — the ticker pane re-opens itself here, but a pin pane never
+    // did, so it silently vanished across a compaction boundary with no
+    // error anywhere. No `focus` here: come back as background tabs, don't
+    // steal focus from whatever the person was looking at.
+    void (async () => {
+      for (const p of await loadPins($)) {
+        try {
+          await $.ui.open({ id: PIN_PREFIX + p.id, title: p.title })
+        } catch {
+          /* best-effort */
+        }
+      }
+    })()
     return next(e)
   })
 
@@ -261,12 +354,50 @@ export const register: Register = (on, options) => {
     return { text: `Session ticker opened.${lastErr ? ' (err: ' + lastErr + ')' : ''}` }
   })
 
+  // Park a chat message as its own tab next to the ticker. The pane id is
+  // dynamic (one per pin) — $.ui.open with a new id is what gives the native
+  // tab (click to switch, ctrl+x x or the close mark to dismiss), no
+  // hand-rolled tab-switching Buttons needed.
+  on('command.run', { command: 'pin' }, async ($, e) => {
+    await ensure($)
+    const text = String(e.args ?? '').trim()
+    if (!text) return { text: 'Usage: /pin <message text>' }
+    const lines = text.split('\n')
+    const title = short(lines.find(l => l.trim().length > 0) ?? 'pinned message')
+    const id = `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
+    const list = await loadPins($)
+    const pin: Pin = { id, title, lines, highlightedRange: null, createdAt: await $.clock.now() }
+    list.push(pin)
+    await savePins($, list)
+    await update($, pins, () => list)
+    try {
+      await $.ui.open({ id: PIN_PREFIX + id, title, focus: true })
+    } catch (err) {
+      return { text: `Pinned as "${title}", but couldn't open its tab: ${String((err as any)?.message ?? err)}` }
+    }
+    return { text: `Pinned as "${title}".` }
+  })
+
+  // Native close (ctrl+x x, the close mark, or this plugin's own dismiss
+  // Button) all raise ui.close the same way — clean up the backing pin
+  // either way so it doesn't linger as dead state on disk.
+  on('ui.close', async ($, e, next) => {
+    if (typeof e.id === 'string' && e.id.startsWith(PIN_PREFIX)) {
+      const pinId = e.id.slice(PIN_PREFIX.length)
+      const list = (await loadPins($)).filter(p => p.id !== pinId)
+      await savePins($, list)
+      await update($, pins, () => list)
+    }
+    return next(e)
+  })
+
   on('prompt.submit', async ($, e, next) => {
     const src = e.source ?? 'user'
     myState = 'working'
     if (src === 'user' || src === 'sdk') {
       mySummary = short(e.prompt) // the ask, until the first action overrides it
       mySource = src
+      myLastActivity = await $.clock.now() // real activity — a nudge/system turn is not
     } else {
       mySource = src // nudge/system turn: keep the last real summary, just heartbeat
     }
@@ -281,6 +412,7 @@ export const register: Register = (on, options) => {
     myState = 'working'
     lastAction = describeAction(e)
     mySummary = lastAction
+    myLastActivity = await $.clock.now()
     await writeMine($)
     return next(e)
   })
@@ -323,52 +455,252 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
-    const list = await read($, tickets) // read-only: no $.state.set during draw
-    const now = await $.clock.now()
-    const fit = Math.max(1, Math.floor(((e.viewport?.rows ?? 24) - 2) / 4))
-    const room = CFG.maxCards > 0 ? Math.min(CFG.maxCards, fit) : fit
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    const { Box, Text, Button, Markdown, Input } = $.ui.resolve(e)
 
-    if (list.length === 0) {
+    // A pinned message's own tab — its own Pane id (PIN_PREFIX + pin id), so
+    // this branch handles every pin pane, whichever one is in front.
+    if (typeof e.requestId === 'string' && e.requestId.startsWith(PIN_PREFIX)) {
+      const pinId = e.requestId.slice(PIN_PREFIX.length)
+      const pinList = await read($, pins)
+      const pin = pinList.find(p => p.id === pinId)
+      if (!pin) {
+        return (
+          <Box borderStyle="round" borderColor="gray" paddingX={1}>
+            <Text dimColor>Pin closed or not found.</Text>
+          </Box>
+        )
+      }
+      // Settled, don't retry: a markdown link in this terminal always draws
+      // as literal "label (url)" text, confirmed with both file: and https:
+      // schemes — it's how this terminal renders ANY link, not a scheme-
+      // specific safety convention. Per-line click-via-link is a dead end
+      // here. Pointing at a line instead moves a single pointer via two real
+      // Buttons — the pointed-at line renders **bold** in the same markdown
+      // text, so it stays visible regardless of content length without
+      // adding one element (or one visible URL) per line.
+      // highlightedRange is shared with the browser-based pin-preview
+      // (pin-preview-server.py, over this exact file) — that side supports
+      // real shift-click multi-line range select; the terminal side can
+      // only ever move a single-line range (no mouse here), but still
+      // renders a multi-line range correctly if the browser set one.
+      const inRange = (i: number) => {
+        const r = pin.highlightedRange
+        return r !== null && i >= r.start && i <= r.end
+      }
+      const numWidth = String(Math.max(0, pin.lines.length - 1)).length
+      const md = pin.lines
+        .map((line, i) => {
+          const num = String(i).padStart(numWidth)
+          const text = line.length > 0 ? line : ' '
+          return inRange(i) ? `**${num} → ${text}**` : `${num}   ${text}`
+        })
+        .join('\n')
+      const movePointer = (delta: number) => async () => {
+        const list2 = await loadPins($)
+        const idx = list2.findIndex(p => p.id === pinId)
+        if (idx < 0) return
+        const cur = list2[idx]
+        const base = cur.highlightedRange?.end ?? -1
+        const nextIdx = Math.min(cur.lines.length - 1, Math.max(0, base + delta))
+        list2[idx] = { ...cur, highlightedRange: { start: nextIdx, end: nextIdx } }
+        await savePins($, list2)
+        await update($, pins, () => list2)
+      }
+      const clearPointer = async () => {
+        const list2 = await loadPins($)
+        const idx = list2.findIndex(p => p.id === pinId)
+        if (idx < 0) return
+        list2[idx] = { ...list2[idx], highlightedRange: null }
+        await savePins($, list2)
+        await update($, pins, () => list2)
+      }
+      // ▲/▼ for fine adjustment; this jump box is the real fix for a long
+      // pin — stepping one line at a time to reach line 79 of 160 isn't
+      // usable. Clamped the same way movePointer is. Always collapses to a
+      // single-line range — multi-line range-select is browser-only
+      // (shift-click), since there's no mouse to drag-select with here.
+      const jumpToLine = async (raw: string) => {
+        const n = Number.parseInt(raw, 10)
+        if (!Number.isFinite(n)) return
+        const list2 = await loadPins($)
+        const idx = list2.findIndex(p => p.id === pinId)
+        if (idx < 0) return
+        const cur = list2[idx]
+        const clamped = Math.min(cur.lines.length - 1, Math.max(0, n))
+        list2[idx] = { ...cur, highlightedRange: { start: clamped, end: clamped } }
+        await savePins($, list2)
+        await update($, pins, () => list2)
+      }
+      // herdr's own mouse UI (kept on, per instruction) swallows every
+      // left-click before it reaches anything inside a pane — not a Claude
+      // Code or library limitation, confirmed via herdr's config-reference
+      // (ui.mouse_capture, no left-click passthrough exists, only a right-
+      // click one). Keyboard input isn't mouse-captured, so hotkeys +
+      // Tab/Enter sidestep it entirely: j/k/c/x fire once this pane has
+      // keyboard focus (ctrl+x tab), no click needed at all.
       return (
-        <Box borderStyle="round" borderColor="gray" paddingX={1}>
-          <Text dimColor>{lastErr ? `no tickets — ${lastErr}` : 'No live sessions yet. Try /ticker.'}</Text>
+        <Box flexDirection="column">
+          <Box flexDirection="row">
+            <Button role="dismiss" hotkey="x" onPress={() => void $.ui.close({ id: e.requestId })}>
+              Close (x)
+            </Button>
+            <Button plain hotkey="k" label="▲" onPress={() => void movePointer(-1)()} />
+            <Button plain hotkey="j" label="▼" onPress={() => void movePointer(1)()} />
+            {pin.highlightedRange !== null && (
+              <Button plain hotkey="c" label="clear" onPress={() => void clearPointer()} />
+            )}
+            <Input
+              key={`pin-jump-${pinId}`}
+              label="jump to line"
+              placeholder={`0-${pin.lines.length - 1}`}
+              onSubmit={value => void jumpToLine(value)}
+            />
+          </Box>
+          <Box borderStyle="round" borderColor="gray" flexDirection="column" paddingX={1}>
+            <Markdown key={`pin-md-${pinId}`} text={md} />
+          </Box>
         </Box>
       )
     }
 
-    return (
-      <Box flexDirection="column">
-        {list.slice(0, room).map(t => {
-          const me = t.key === myKey
-          const s = stateOf(t)
-          const v = view(s)
-          const accent = accentOf(t.key)
-          const borderColor = v.border ?? accent
-          const borderStyle = v.border === 'red' || me ? 'bold' : 'round'
-          const where = t.host && t.host !== 'local' ? t.host : ''
-          return (
-            <Box borderStyle={borderStyle} borderColor={borderColor} flexDirection="column" paddingX={1}>
+    if (e.requestId !== PANE) return next(e)
+
+    const list = await read($, tickets) // read-only: no $.state.set during draw
+    const taskList = await read($, tasks)
+    const now = await $.clock.now()
+
+    // This session's own task stack — a path from root to the active leaf,
+    // with completed side-branches kept (dim) for memory after a gap.
+    const byId = new Map(taskList.map(t => [t.id, t] as const))
+    const depthOf = (t: TaskNode): number => {
+      let d = 0
+      let cur: TaskNode | undefined = t
+      const seen = new Set<string>()
+      while (cur?.parentId && !seen.has(cur.parentId)) {
+        seen.add(cur.parentId)
+        cur = byId.get(cur.parentId)
+        d++
+      }
+      return d
+    }
+    const taskGlyph = (s: TaskStatus): { glyph: string; color: string } =>
+      s === 'active' ? { glyph: '●', color: 'cyan' } : s === 'paused' ? { glyph: '◐', color: 'yellow' } : { glyph: '✓', color: 'gray' }
+    // active (in progress) first, then paused (shelved), then done last.
+    // Within paused, shallowest (closest to root) first, matching reading
+    // order top-to-bottom as you'd unwind back out. Within done, most
+    // recently closed first — most relevant to recall after a gap.
+    const statusRank = (s: TaskStatus) => (s === 'active' ? 0 : s === 'paused' ? 1 : 2)
+    const orderedTasks = [...taskList].sort((a, b) => {
+      const r = statusRank(a.status) - statusRank(b.status)
+      if (r !== 0) return r
+      if (a.status === 'done') return (b.closedAt ?? b.createdAt) - (a.closedAt ?? a.createdAt)
+      return depthOf(a) - depthOf(b)
+    })
+
+    const taskBox =
+      orderedTasks.length > 0 ? (
+        <Box borderStyle="round" borderColor="gray" flexDirection="column" paddingX={1}>
+          <Text dimColor bold>
+            Tasks
+          </Text>
+          {orderedTasks.map(t => {
+            const depth = depthOf(t)
+            const v = taskGlyph(t.status)
+            return (
               <Box flexDirection="row">
-                <Text color={v.color} bold>
+                {depth > 0 && <Text dimColor>{'  '.repeat(depth)}</Text>}
+                <Text color={v.color}>
                   {v.glyph}{' '}
                 </Text>
-                <Text color={accent} bold>
-                  {t.label}
+                <Text dimColor={t.status === 'done'} bold={t.status === 'active'}>
+                  {t.name}
                 </Text>
+              </Box>
+            )
+          })}
+        </Box>
+      ) : null
+
+    if (list.length === 0) {
+      return (
+        <Box flexDirection="column">
+          <Box borderStyle="round" borderColor="gray" paddingX={1}>
+            <Text dimColor>{lastErr ? `no tickets — ${lastErr}` : 'No live sessions yet. Try /ticker.'}</Text>
+          </Box>
+          {taskBox}
+        </Box>
+      )
+    }
+
+    // Active = genuinely recent activity, or a needs-you alert (never demoted to
+    // a one-liner regardless of age — it still needs a human to see it).
+    const activeMs = Math.max(1, CFG.activeSeconds) * 1000
+    const isActive = (t: Ticket) =>
+      stateOf(t) === 'needs-you' || now - (t.lastActivity ?? t.updated) < activeMs
+    const active = list.filter(isActive)
+    const idle = list.filter(t => !isActive(t))
+
+    // Active cards are ~2 rows each; idle rows are 1 each. Budget what's left
+    // for idle after active + outer border/padding overhead, truncate with a count.
+    const rows = e.viewport?.rows ?? 24
+    const idleBudget = Math.max(0, rows - active.length * 2 - 3)
+    const idleShown = idle.slice(0, idleBudget)
+    const idleMore = idle.length - idleShown.length
+
+    return (
+      <Box flexDirection="column">
+        <Box borderStyle="round" borderColor="gray" flexDirection="column" paddingX={1}>
+          {active.map(t => {
+            const me = t.key === myKey
+            const v = view(stateOf(t))
+            const accent = accentOf(t.key)
+            const where = t.host && t.host !== 'local' ? t.host : ''
+            return (
+              <Box flexDirection="column">
+                <Box flexDirection="row">
+                  <Text color={v.color} bold>
+                    {v.glyph}{' '}
+                  </Text>
+                  <Text color={accent} bold>
+                    {t.label}
+                  </Text>
+                  {me && <Text dimColor> (you)</Text>}
+                  {v.tag && <Text color="red" bold>{v.tag}</Text>}
+                  <Text dimColor>
+                    {'  '}
+                    {where ? `@${where} · ` : ''}
+                    {age(now, t.updated)}
+                  </Text>
+                </Box>
+                <Text dimColor>{t.summary}</Text>
+              </Box>
+            )
+          })}
+          {active.length > 0 && idleShown.length > 0 && <Text dimColor>{'─'.repeat(24)}</Text>}
+          {idleShown.map(t => {
+            const me = t.key === myKey
+            const v = view(stateOf(t))
+            const accent = accentOf(t.key)
+            const where = t.host && t.host !== 'local' ? t.host : ''
+            return (
+              <Box flexDirection="row">
+                <Text color={v.color}>
+                  {v.glyph}{' '}
+                </Text>
+                <Text color={accent}>{t.label}</Text>
                 {me && <Text dimColor> (you)</Text>}
-                {v.tag && <Text color="red" bold>{v.tag}</Text>}
                 <Text dimColor>
                   {'  '}
                   {where ? `@${where} · ` : ''}
                   {age(now, t.updated)}
                 </Text>
               </Box>
-              <Text dimColor>{t.summary}</Text>
-            </Box>
-          )
-        })}
+            )
+          })}
+          {idleMore > 0 && <Text dimColor>  +{idleMore} more idle</Text>}
+        </Box>
+        {taskBox}
       </Box>
     )
   })

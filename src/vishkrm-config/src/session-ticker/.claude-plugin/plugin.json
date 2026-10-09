@@ -1,7 +1,7 @@
 {
   "name": "session-ticker",
-  "version": "0.2.0",
-  "description": "Live board of other same-host Claude sessions: a one-line status per session, colour-coded, with needs-you alerts",
+  "version": "0.3.0",
+  "description": "Live board of other same-host Claude sessions: a one-line status per session, colour-coded, with needs-you alerts. Plus a per-session task stack and /pin (park a chat message as its own tab).",
   "types": "./types/index.d.ts",
   "userConfig": {
     "summaryModel": {
@@ -28,6 +28,12 @@
       "title": "Max cards",
       "default": 0,
       "description": "Maximum session cards to show (0 = fit to the pane height)"
+    },
+    "activeSeconds": {
+      "type": "number",
+      "title": "Active window (seconds)",
+      "default": 20,
+      "description": "A session stays a full detail card this long after its last update, then collapses to a compact one-line list entry (needs-you alerts never collapse)"
     }
   }
 }
